@@ -84,8 +84,23 @@ class LockManager:
         if entry.lease_id != lease_id:
             return False
 
-        revoke_result = self.lease_manager.revoke(lease_id)
-        return revoke_result.get("success", False)
+        delete_result = None
+        delete_event = threading.Event()
+
+        def on_delete(res):
+            nonlocal delete_result
+            delete_result = res
+            delete_event.set()
+
+        cmd = KVCommand(type=CommandType.DELETE, key=lock_key)
+        self.raft_node.submit_command(cmd, on_delete)
+        delete_event.wait(timeout=5.0)
+
+        self.lease_manager.revoke(lease_id)
+
+        if delete_result and hasattr(delete_result, 'success'):
+            return delete_result.success
+        return delete_result is not None
 
     def is_locked(self, lock_name: str) -> bool:
         lock_key = f"locks/{lock_name}"

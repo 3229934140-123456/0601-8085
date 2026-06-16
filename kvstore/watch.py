@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Callable, Set, Deque
 class EventType(Enum):
     PUT = "PUT"
     DELETE = "DELETE"
+    COMPACTED = "COMPACTED"
 
 
 @dataclass
@@ -27,7 +28,8 @@ class Watcher:
     prefix: Optional[str] = None
     start_revision: int = 0
     callback: Callable[[WatchEvent], None] = None
-    queue: Optional[deque] = None
+    queue: deque = field(default_factory=deque)
+    compacted: bool = False
 
 
 class WatchManager:
@@ -45,8 +47,7 @@ class WatchManager:
             self._event_history.append(event)
             for watcher in self._watchers.values():
                 if self._match(watcher, event):
-                    if watcher.queue is not None:
-                        watcher.queue.append(event)
+                    watcher.queue.append(event)
                     if watcher.callback:
                         try:
                             watcher.callback(event)
@@ -54,11 +55,18 @@ class WatchManager:
                             pass
 
     def _match(self, watcher: Watcher, event: WatchEvent) -> bool:
+        if event.type == EventType.COMPACTED:
+            return True
         if watcher.key:
             return event.key == watcher.key
         if watcher.prefix:
             return event.key.startswith(watcher.prefix)
         return True
+
+    def _get_min_revision(self) -> int:
+        if not self._event_history:
+            return 0
+        return self._event_history[0].revision
 
     def watch(self, key: Optional[str] = None, prefix: Optional[str] = None,
               start_revision: int = 0,
@@ -73,6 +81,7 @@ class WatchManager:
                 prefix=prefix,
                 start_revision=start_revision,
                 callback=callback,
+                queue=deque(),
             )
             self._watchers[watch_id] = watcher
 
@@ -84,9 +93,28 @@ class WatchManager:
         if watcher.start_revision <= 0:
             return
 
+        min_rev = self._get_min_revision()
+        if not self._event_history:
+            return
+
+        if watcher.start_revision < min_rev:
+            compacted_event = WatchEvent(
+                type=EventType.COMPACTED,
+                key="",
+                revision=min_rev,
+            )
+            watcher.queue.append(compacted_event)
+            watcher.compacted = True
+            if watcher.callback:
+                try:
+                    watcher.callback(compacted_event)
+                except Exception:
+                    pass
+
         for event in self._event_history:
             if event.revision >= watcher.start_revision:
                 if self._match(watcher, event):
+                    watcher.queue.append(event)
                     if watcher.callback:
                         try:
                             watcher.callback(event)
@@ -105,10 +133,6 @@ class WatchManager:
             watcher = self._watchers.get(watch_id)
             if not watcher:
                 return None
-
-            if watcher.queue is None:
-                watcher.queue = deque()
-
             if watcher.queue:
                 return watcher.queue.popleft()
 
@@ -122,9 +146,22 @@ class WatchManager:
                 watcher = self._watchers.get(watch_id)
                 if not watcher:
                     return None
-                if watcher.queue and watcher.queue:
+                if watcher.queue:
                     return watcher.queue.popleft()
         return None
+
+    def poll_all(self, watch_id: int, timeout: float = 0) -> List[WatchEvent]:
+        events = []
+        first = self.poll(watch_id, timeout)
+        if first is None:
+            return events
+        events.append(first)
+        while True:
+            ev = self.poll(watch_id, 0)
+            if ev is None:
+                break
+            events.append(ev)
+        return events
 
     def get_event_history(self, start_revision: int = 0,
                           key: Optional[str] = None,

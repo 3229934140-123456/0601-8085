@@ -103,6 +103,27 @@ class LockServiceServer:
             return False
         return result.success if hasattr(result, 'success') else False
 
+    def txn(self, ops: list) -> dict:
+        from kvstore import KVCommand, CommandType
+        cmd = KVCommand(type=CommandType.TXN, ops=ops)
+
+        result = None
+        event = threading.Event()
+
+        def callback(res):
+            nonlocal result
+            result = res
+            event.set()
+
+        self.raft.submit_command(cmd, callback)
+        event.wait(timeout=5.0)
+
+        if result is None:
+            return {"success": False, "error": "timeout"}
+        if hasattr(result, 'success'):
+            return {"success": result.success, "error": result.error, "value": result.value}
+        return {"success": False, "error": "unknown"}
+
     def lease_grant(self, ttl: float, lease_id: str = None) -> dict:
         return self.lease_manager.grant(ttl, lease_id)
 
@@ -139,6 +160,9 @@ class LockServiceServer:
 
     def watch_poll(self, watch_id: int, timeout: float = 0):
         return self.watch_manager.poll(watch_id, timeout)
+
+    def watch_poll_all(self, watch_id: int, timeout: float = 0):
+        return self.watch_manager.poll_all(watch_id, timeout)
 
 
 class LockServiceCluster:

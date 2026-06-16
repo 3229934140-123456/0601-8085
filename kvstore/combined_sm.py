@@ -44,17 +44,12 @@ class CombinedStateMachine(StateMachine):
 
         if cmd.type == KVCommandType.PUT or cmd.type == KVCommandType.PUT_IF_ABSENT:
             if cmd.lease_id:
+                if hasattr(result, 'prev_lease_id') and result.prev_lease_id and result.prev_lease_id != cmd.lease_id:
+                    self.lease_sm.remove_key_from_lease(result.prev_lease_id, cmd.key)
                 self.lease_sm.add_key_to_lease(cmd.lease_id, cmd.key)
-            elif cmd.type == KVCommandType.PUT and hasattr(result, 'prev_value'):
-                existing = self.kv_store.get(cmd.key)
-                if existing and existing.lease_id:
-                    pass
         elif cmd.type == KVCommandType.DELETE:
-            entry = self.kv_store.get(cmd.key)
-            if entry and entry.lease_id:
-                self.lease_sm.remove_key_from_lease(entry.lease_id, cmd.key)
-            if hasattr(result, 'prev_value'):
-                pass
+            if hasattr(result, 'prev_lease_id') and result.prev_lease_id:
+                self.lease_sm.remove_key_from_lease(result.prev_lease_id, cmd.key)
 
     def snapshot(self) -> bytes:
         data = {

@@ -45,6 +45,7 @@ class KVResult:
     value: Any = None
     error: str = None
     prev_value: Any = None
+    prev_lease_id: Optional[str] = None
 
 
 @dataclass
@@ -94,6 +95,7 @@ class KVStore(StateMachine):
     def _do_put(self, key: str, value: Any, lease_id: Optional[str], revision: int) -> KVResult:
         existing = self._data.get(key)
         prev_value = existing.value if existing else None
+        prev_lease_id = existing.lease_id if existing else None
 
         if existing:
             entry = KVEntry(
@@ -120,7 +122,7 @@ class KVStore(StateMachine):
             prev_value=prev_value,
             revision=revision,
         ))
-        return KVResult(success=True, prev_value=prev_value)
+        return KVResult(success=True, prev_value=prev_value, prev_lease_id=prev_lease_id)
 
     def _do_delete(self, key: str, revision: int) -> KVResult:
         if key not in self._data:
@@ -133,7 +135,7 @@ class KVStore(StateMachine):
             prev_value=existing.value,
             revision=revision,
         ))
-        return KVResult(success=True, prev_value=existing.value)
+        return KVResult(success=True, prev_value=existing.value, prev_lease_id=existing.lease_id)
 
     def _do_put_if_absent(self, key: str, value: Any, lease_id: Optional[str], revision: int) -> KVResult:
         if key in self._data:
@@ -174,25 +176,50 @@ class KVStore(StateMachine):
         if not ops:
             return KVResult(success=True)
 
+        saved_data = {k: KVEntry(
+            value=v.value,
+            version=v.version,
+            lease_id=v.lease_id,
+            create_revision=v.create_revision,
+            mod_revision=v.mod_revision,
+        ) for k, v in self._data.items()}
+
+        saved_callbacks = list(self._watch_callbacks)
+        pending_events: List[WatchEvent] = []
+        self._watch_callbacks = [lambda e: pending_events.append(e)]
+
         results = []
-        for op in ops:
-            op_type = op.get("type")
-            if op_type == "put":
-                res = self._do_put(op["key"], op.get("value"), op.get("lease_id"), revision)
-            elif op_type == "delete":
-                res = self._do_delete(op["key"], revision)
-            elif op_type == "put_if_absent":
-                res = self._do_put_if_absent(op["key"], op.get("value"), op.get("lease_id"), revision)
-            elif op_type == "cas":
-                res = self._do_cas(op["key"], op.get("expected_version"), op.get("value"), op.get("lease_id"), revision)
-            else:
-                return KVResult(success=False, error=f"unknown op type: {op_type}")
+        try:
+            for op in ops:
+                op_type = op.get("type")
+                if op_type == "put":
+                    res = self._do_put(op["key"], op.get("value"), op.get("lease_id"), revision)
+                elif op_type == "delete":
+                    res = self._do_delete(op["key"], revision)
+                elif op_type == "put_if_absent":
+                    res = self._do_put_if_absent(op["key"], op.get("value"), op.get("lease_id"), revision)
+                elif op_type == "cas":
+                    res = self._do_cas(op["key"], op.get("expected_version"), op.get("value"), op.get("lease_id"), revision)
+                else:
+                    self._data = saved_data
+                    self._watch_callbacks = saved_callbacks
+                    return KVResult(success=False, error=f"unknown op type: {op_type}")
 
-            if not res.success:
-                return KVResult(success=False, error=f"txn failed at op: {op_type}, {res.error}")
-            results.append(res)
+                if not res.success:
+                    self._data = saved_data
+                    self._watch_callbacks = saved_callbacks
+                    return KVResult(success=False, error=f"txn failed at op: {op_type}, {res.error}")
+                results.append(res)
 
-        return KVResult(success=True, value=results)
+            self._watch_callbacks = saved_callbacks
+            for ev in pending_events:
+                self._notify_watch(ev)
+
+            return KVResult(success=True, value=results)
+        except Exception as e:
+            self._data = saved_data
+            self._watch_callbacks = saved_callbacks
+            return KVResult(success=False, error=f"txn error: {e}")
 
     def get(self, key: str) -> Optional[KVEntry]:
         with self._lock:

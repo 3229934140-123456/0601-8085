@@ -1,6 +1,6 @@
 import threading
 import time
-from typing import Optional, Callable, Any
+from typing import Optional, Callable, Any, List
 
 from kvstore import WatchEvent
 
@@ -17,6 +17,9 @@ class LockServiceClient:
 
     def delete(self, key: str) -> bool:
         return self._server.delete(key)
+
+    def txn(self, ops: List[dict]) -> dict:
+        return self._server.txn(ops)
 
     def lease_grant(self, ttl: float, lease_id: str = None) -> dict:
         return self._server.lease_grant(ttl, lease_id)
@@ -36,6 +39,12 @@ class LockServiceClient:
         return self._server.watch(key=key, prefix=prefix,
                                   start_revision=start_revision,
                                   callback=callback)
+
+    def watch_poll(self, watch_id: int, timeout: float = 0) -> Optional[WatchEvent]:
+        return self._server.watch_poll(watch_id, timeout)
+
+    def watch_poll_all(self, watch_id: int, timeout: float = 0) -> List[WatchEvent]:
+        return self._server.watch_poll_all(watch_id, timeout)
 
     def unwatch(self, watch_id: int) -> bool:
         return self._server.unwatch(watch_id)
